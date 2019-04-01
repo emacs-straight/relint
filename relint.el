@@ -3,8 +3,8 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.5
-;; Package-Requires: ((xr "1.7"))
+;; Version: 1.6
+;; Package-Requires: ((xr "1.10"))
 ;; URL: https://github.com/mattiase/relint
 ;; Keywords: lisp, maint, regexps
 
@@ -25,30 +25,57 @@
 
 ;; Scan elisp files for regexp strings and reports potential errors,
 ;; including deprecated syntax and bad practice.
-;; Also check the regexp-like-but-not-quite skip-set arguments to
+;; Also check the regexp-like skip-set arguments to
 ;; `skip-chars-forward' and `skip-chars-backward'.
 ;;
 ;; How to use:
 ;;
 ;; * Inside Emacs:
 ;;
-;;   M-x relint-file       (check a single elisp file)
-;;   M-x relint-directory  (check all .el files in a directory tree)
+;;   M-x relint-file            (check a single elisp file)
+;;   M-x relint-directory       (check all .el files in a directory tree)
+;;   M-x relint-current-buffer  (check current buffer)
+;;
+;;   In the `*relint*' buffer, pressing "g" will re-run the same check.
 ;;
 ;; * From batch mode:
 ;;
 ;;   emacs -batch -l relint.el -f relint-batch FILES-AND-DIRS...
 ;;
-;; Since there is no sure way to know whether a particular string is a
-;; regexp, the code has to guess a lot, and will likely miss quite a
-;; few. It tries to minimise the amount of false positives.
+;;   where options for finding relint and xr need to be added after
+;;   `-batch', either `-f package-initialize' or `-L DIR'.
+
+;; Bugs:
 ;;
-;; In other words, it is a nothing but a hack.
+;;   Since there is no sure way to know whether a particular string is a
+;;   regexp, the code has to guess a lot, and will likely miss quite a
+;;   few. It tries to minimise the amount of false positives.
+;;   In other words, it is a nothing but a hack.
+
+;;; News:
+
+;; Version 1.6:
+;; - Add `relint-current-buffer'
+;; - Show relative file names in *relint*
+;; - Extended regexp-generating heuristics, warning about suspiciously-named
+;;   variables used as skip-sets
+;; - "-patterns" and "-pattern-list" are no longer interesting variable
+;;   suffixes
+;; Version 1.5:
+;; - Substantially improved evaluator, able to evaluate some functions and
+;;   macros defined in the same file, even when passed as parameters
+;; - Detect regexps spliced into [...]
+;; - Check bad skip-set provenance
+;; - The *relint* buffer now uses a new relint-mode for better usability,
+;;   with "g" bound to `relint-again'
+;; Version 1.4:
+;; - First version after name change to `relint'
 
 ;;; Code:
 
 (require 'xr)
 (require 'compile)
+(require 'cl-seq)
 
 (defconst relint--error-buffer-name "*relint*")
 
@@ -185,7 +212,7 @@
     format format-message
     regexp-quote regexp-opt regexp-opt-charset
     reverse
-    member memq remove remq member-ignore-case
+    member memq memql remove remq member-ignore-case
     assoc assq rassoc rassq
     identity
     string make-string make-list
@@ -221,11 +248,25 @@
 ;; Alist mapping non-safe functions to semantically equivalent safe
 ;; alternatives.
 (defconst relint--safe-alternatives
-  '((nconc . append)
-    (delete . remove)
-    (delq . remq)
+  '((nconc    . append)
+    (delete   . remove)
+    (delq     . remq)
     (nreverse . reverse)
     (nbutlast . butlast)))
+
+;; Alist mapping non-safe cl functions to semantically equivalent safe
+;; alternatives. They may still require wrapping their function arguments.
+(defconst relint--safe-cl-alternatives
+  '((cl-delete-duplicates . cl-remove-duplicates)
+    (cl-delete            . cl-remove)
+    (cl-delete-if         . cl-remove-if)
+    (cl-delete-if-not     . cl-remove-if-not)
+    (cl-nsubstitute       . cl-substitute)
+    (cl-nunion            . cl-union)
+    (cl-nintersection     . cl-intersection)
+    (cl-nset-difference   . cl-set-difference)
+    (cl-nset-exclusive-or . cl-set-exclusive-or)
+    (cl-nsublis           . cl-sublis)))
 
 ;; Make an `rx' form safe to translate, by mutating (eval ...) subforms.
 (defun relint--rx-safe (form)
@@ -298,6 +339,20 @@
         'relint--no-value)))
    (t 'relint--no-value)))
 
+;; Wrap the function arguments :test, :test-not, :key in ARGS.
+(defun relint--wrap-cl-keyword-args (args)
+  (let ((test     (plist-get args :test))
+        (test-not (plist-get args :test-not))
+        (key      (plist-get args :key))
+        (ret (copy-sequence args)))
+    (when test
+      (plist-put ret :test     (relint--wrap-function test)))
+    (when test-not
+      (plist-put ret :test-not (relint--wrap-function test-not)))
+    (when key
+      (plist-put ret :key      (relint--wrap-function key)))
+    ret))
+
 ;; Evaluate a form. Throw 'relint-eval 'no-value if something could
 ;; not be evaluated safely.
 (defun relint--eval (form)
@@ -324,7 +379,7 @@
    ((eq (car form) 'eval-when-compile)
     (relint--eval (car (last form))))
 
-   ;; Reasonably pure functions: only call if all args can be fully evaluated.
+   ;; Functions considered safe.
    ((memq (car form) relint--safe-functions)
     (let ((args (mapcar #'relint--eval (cdr form))))
       ;; Catching all errors isn't wonderful, but sometimes a global
@@ -415,68 +470,80 @@
     (relint--eval (cons (cdr (assq (car form) relint--safe-alternatives))
                         (cdr form))))
 
+   ((assq (car form) relint--safe-cl-alternatives)
+    (relint--eval (cons (cdr (assq (car form) relint--safe-cl-alternatives))
+                        (cdr form))))
+   
    ;; delete-dups: Work on a copy of the argument.
    ((eq (car form) 'delete-dups)
     (let ((arg (relint--eval (cadr form))))
       (delete-dups (copy-sequence arg))))
 
-   ;; FIXME: more macros. Maybe ones from cl?
-   ;; If they are useful but expand to impure code, we need to emulate them.
-   ((memq (car form) '(when unless \` backquote-list* pcase pcase-let))
+   ;; Safe macros that expand to pure code, and their auxiliary macros.
+   ((memq (car form) '(when unless
+                       \` backquote-list*
+                       pcase pcase-let pcase-let* pcase--flip))
     (relint--eval (macroexpand form)))
 
-   ;; apply: Call only if the function is safe and all args evaluated.
-   ((eq (car form) 'apply)
-    (let ((args (mapcar #'relint--eval (cdr form))))
-      (let ((fun (relint--wrap-function (car args))))
-        (condition-case err
-            (apply #'apply (cons fun (cdr args)))
-          (error (signal 'relint--eval-error (format "eval error: %S: %s"
-                                                     form err)))))))
+   ;; Functions taking a function as first argument.
+   ((memq (car form) '(apply funcall mapconcat
+                       cl-some cl-every cl-notany cl-notevery))
+    (let ((fun (relint--wrap-function (relint--eval (cadr form))))
+          (args (mapcar #'relint--eval (cddr form))))
+      (condition-case nil
+          (apply (car form) fun args)
+        (error (throw 'relint-eval 'no-value)))))
+          
+   ;; Functions with functions as keyword arguments :test, :test-not, :key
+   ((memq (car form) '(cl-remove-duplicates cl-remove cl-substitute cl-member
+                       cl-find cl-position cl-count cl-mismatch cl-search
+                       cl-union cl-intersection cl-set-difference
+                       cl-set-exclusive-or cl-subsetp
+                       cl-assoc cl-rassoc
+                       cl-sublis))
+    (let ((args (relint--wrap-cl-keyword-args
+                 (mapcar #'relint--eval (cdr form)))))
+      (condition-case nil
+          (apply (car form) args)
+        (error (throw 'relint-eval 'no-value)))))
+    
+   ;; Functions taking a function as first argument,
+   ;; and with functions as keyword arguments :test, :test-not, :key
+   ((memq (car form) '(cl-reduce cl-remove-if cl-remove-if-not
+                       cl-find-if cl-find-if not
+                       cl-position-if cl-position-if-not
+                       cl-count-if cl-count-if-not
+                       cl-member-if cl-member-if-not
+                       cl-assoc-if cl-assoc-if-not
+                       cl-rassoc-if cl-rassoc-if-not))
+    (let ((fun (relint--wrap-function (relint--eval (cadr form))))
+          (args (relint--wrap-cl-keyword-args
+                 (mapcar #'relint--eval (cddr form)))))
+      (condition-case nil
+          (apply (car form) fun args)
+        (error (throw 'relint-eval 'no-value)))))
 
-   ;; funcall: Call only if the function is safe and all args evaluated.
-   ((eq (car form) 'funcall)
-    (let ((args (mapcar #'relint--eval (cdr form))))
-      (let ((fun (relint--wrap-function (car args))))
-        (condition-case err
-            (apply fun (cdr args))
-          (error (signal 'relint--eval-error (format "eval error: %S: %s"
-                                                     form err)))))))
-
-   ;; mapcar, mapcan: Call only if the function is safe.
-   ;; The sequence argument may be missing a few arguments that we cannot
-   ;; evaluate.
+   ;; mapcar, mapcan: accept missing items in the list argument.
    ((memq (car form) '(mapcar mapcan))
     (let* ((fun (relint--wrap-function (relint--eval (cadr form))))
            (arg (relint--eval-list (caddr form)))
            (seq (if (listp arg)
                     (remq nil arg)
                   arg)))
-      (condition-case err
+      (condition-case nil
           (funcall (car form) fun seq)
-        (error (signal 'relint--eval-error (format "eval error: %S: %s"
-                                                   form err))))))
+        (error (throw 'relint-eval 'no-value)))))
 
-   ;; mapconcat: Call only if the function is safe and all arguments evaluated.
-   ((eq (car form) 'mapconcat)
-    (let ((fun (relint--wrap-function (relint--eval (cadr form))))
-          (args (mapcar #'relint--eval (cddr form))))
-      (condition-case err
-          (apply (car form) fun args)
-        (error (signal 'relint--eval-error (format "eval error: %S: %s"
-                                                   form err))))))
-          
-   ;; sort: accept missing items in a list argument.
+   ;; sort: accept missing items in the list argument.
    ((eq (car form) 'sort)
     (let* ((arg (relint--eval-list (cadr form)))
            (seq (cond ((listp arg) (remq nil arg))
                       ((sequencep arg) (copy-sequence arg))
                       (arg)))
            (pred (relint--wrap-function (relint--eval (caddr form)))))
-      (condition-case err
+      (condition-case nil
           (sort seq pred)
-        (error (signal 'relint--eval-error (format "eval error: %S: %s"
-                                                   form err))))))
+        (error (throw 'relint-eval 'no-value)))))
 
    ;; rx, rx-to-string: check for (eval ...) constructs first, then apply.
    ((eq (car form) 'rx)
@@ -505,7 +572,6 @@
       (let ((relint--variables (append bindings relint--variables)))
         (relint--eval (car (last form))))))
 
-   ;; let*: bind a single variable and recurse.
    ((eq (car form) 'let*)
     (unless (= (length form) 3)
       (throw 'relint-eval 'no-value))
@@ -526,6 +592,13 @@
    ;; form. Just eval the arg and hope for the best.
    ((eq (car form) '\,)
     (relint--eval (cadr form)))
+
+   ;; functionp: be optimistic, for determinism
+   ((eq (car form) 'functionp)
+    (let ((arg (relint--eval (cadr form))))
+      (cond
+       ((symbolp arg) (not (memq arg '(nil t))))
+       ((consp arg) (eq (car arg) 'lambda)))))
 
    ;; featurep: only handle features that we are reasonably sure about,
    ;; to avoid depending too much on the particular host Emacs.
@@ -652,16 +725,29 @@
                  re (format "%s (%s)" name rule-name) file pos path)))))
         (relint--get-list form file pos path)))
 
-;; List of known regexp-generating functions used in EXPR.
+;; List of regexp-generating functions and variables used in EXPR.
 ;; EXPANDED is a list of expanded functions, to prevent recursion.
 (defun relint--regexp-generators (expr expanded)
   (cond
    ((symbolp expr)
-    (let ((def (assq expr relint--variables)))
-      (and def (relint--regexp-generators (cdr def) expanded))))
+    (and (not (memq expr '(nil t)))
+         (let ((def (assq expr relint--variables)))
+           (if def
+               (relint--regexp-generators (cdr def) expanded)
+             (and (or (memq expr '(page-delimiter paragraph-separate
+                                   paragraph-start sentence-end))
+                      ;; This is guesswork, but effective.
+                      (string-match-p
+                       (rx (or (seq bos (or "regexp" "regex"))
+                               (or "-regexp" "-regex" "-re"))
+                           eos)
+                       (symbol-name expr)))
+                  (list expr))))))
    ((atom expr) nil)
    ((memq (car expr) '(regexp-quote regexp-opt regexp-opt-charset
-                       rx rx-to-string wildcard-to-regexp))
+                       rx rx-to-string wildcard-to-regexp read-regexp
+                       char-fold-to-regexp find-tag-default-as-regexp
+                       find-tag-default-as-symbol-regexp sentence-end))
     (list (car expr)))
    ((memq (car expr) '(looking-at re-search-forward re-search-backward
                        string-match string-match-p looking-back looking-at-p))
@@ -856,8 +942,8 @@
                          (symbol-name name))
          (relint--check-re re-arg name file pos (cons 2 path))
          (push name relint--checked-variables))
-        ((string-match-p (rx (or (or "-regexps" "-regexes" "-patterns")
-                                 (seq (or "-regexp" "-re" "-regex" "-pattern")
+        ((string-match-p (rx (or (or "-regexps" "-regexes")
+                                 (seq (or "-regexp" "-re" "-regex")
                                       "-list"))
                              eos)
                          (symbol-name name))
@@ -959,41 +1045,42 @@
           (push (cons form pos) forms))))
     (nreverse forms)))
 
-(defun relint--single-file (file)
+(defun relint--scan-current-buffer (file)
   (let ((errors-before relint--error-count))
-    (with-temp-buffer
-      (emacs-lisp-mode)
-      (insert-file-contents file)
-      (let ((forms (relint--read-buffer file))
-            (case-fold-search nil)
-            (relint--variables nil)
-            (relint--checked-variables nil)
-            (relint--regexp-functions nil)
-            (relint--function-defs nil)
-            (relint--macro-defs nil)
-            )
-        (dolist (form forms)
-          (relint--check-form-recursively-1 (car form) file (cdr form) nil))
-        (dolist (form forms)
-          (relint--check-form-recursively-2 (car form) file (cdr form) nil))))
+    (let ((forms (relint--read-buffer file))
+          (relint--variables nil)
+          (relint--checked-variables nil)
+          (relint--regexp-functions nil)
+          (relint--function-defs nil)
+          (relint--macro-defs nil)
+          (case-fold-search nil))
+      (dolist (form forms)
+        (relint--check-form-recursively-1 (car form) file (cdr form) nil))
+      (dolist (form forms)
+        (relint--check-form-recursively-2 (car form) file (cdr form) nil)))
     (when (> relint--error-count errors-before)
       (relint--show-errors))))
+
+(defun relint--scan-file (file base-dir)
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert-file-contents file)
+    (relint--scan-current-buffer (file-relative-name file base-dir))))
         
 (defvar relint-last-target nil
-  "The last file or directory on which relint was run.  Buffer-local.")
+  "The last file, directory or buffer on which relint was run.")
 
-(defun relint--init (target)
+(defun relint--init (target base-dir)
   (if noninteractive
       (setq relint--error-count 0)
     (with-current-buffer (relint--error-buffer)
       (let ((inhibit-read-only t))
+        (compilation-forget-errors)
         (erase-buffer)
-        (insert (format "Relint results for %s\n" target)))
+        (insert (format "Relint results for %s\n" target))
+        (relint--show-errors))
       (setq relint-last-target target)
-      (setq default-directory
-            (if (file-directory-p target)
-                target
-              (file-name-directory target)))
+      (setq default-directory base-dir)
       (setq relint--error-count 0))))
 
 (defun relint--finish ()
@@ -1004,11 +1091,16 @@
     (message "relint: %s found." msg)))
 
 (defun relint-again ()
-  "Re-run relint on the same file or directory as last time."
+  "Re-run relint on the same file, directory or buffer as last time."
   (interactive)
-  (if (file-directory-p relint-last-target)
-      (relint-directory relint-last-target)
-    (relint-file relint-last-target)))
+  (cond ((bufferp relint-last-target)
+         (with-current-buffer relint-last-target
+           (relint-current-buffer)))
+        ((file-directory-p relint-last-target)
+         (relint-directory relint-last-target))
+        ((file-readable-p relint-last-target)
+         (relint-file relint-last-target))
+        (t (error "No target"))))
 
 (defvar relint-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1023,11 +1115,11 @@
   "Mode for relint output."
   (setq-local relint-last-target nil))
 
-(defun relint--scan-files (files target)
-  (relint--init target)
+(defun relint--scan-files (files target base-dir)
+  (relint--init target base-dir)
   (dolist (file files)
     ;;(relint--add-to-error-buffer (format "Scanning %s\n" file))
-    (relint--single-file file))
+    (relint--scan-file file base-dir))
   (relint--finish))
 
 (defun relint--tree-files (dir)
@@ -1037,20 +1129,34 @@
 
 ;;;###autoload
 (defun relint-file (file)
-  "Scan FILE, an elisp file, for errors in regexp strings."
+  "Scan FILE, an elisp file, for regexp-related errors."
   (interactive "fRelint elisp file: ")
-  (relint--scan-files (list file) file))
-        
+  (relint--scan-files (list file) file (file-name-directory file)))
 
 ;;;###autoload
 (defun relint-directory (dir)
-  "Scan all *.el files in DIR for errors in regexp strings."
+  "Scan all *.el files in DIR for regexp-related errors."
   (interactive "DRelint directory: ")
-  (relint--scan-files (relint--tree-files dir) dir))
+  (message "Finding .el files in %s..." dir)
+  (let ((files (relint--tree-files dir)))
+    (message "Scanning files...")
+    (relint--scan-files files dir dir)))
+
+;;;###autoload
+(defun relint-current-buffer ()
+  "Scan the current buffer for regexp errors.
+The buffer must be in emacs-lisp-mode."
+  (interactive)
+  (unless (eq major-mode 'emacs-lisp-mode)
+    (error "Relint: can only scan elisp code (use emacs-lisp-mode)"))
+  (relint--init (current-buffer) default-directory)
+  (save-excursion
+    (relint--scan-current-buffer (buffer-name)))
+  (relint--finish))
 
 
 (defun relint-batch ()
-  "Scan elisp source files for errors in regex strings.
+  "Scan elisp source files for regexp-related errors.
 Call this function in batch mode with files and directories as
 command-line arguments.  Files are scanned; directories are
 searched recursively for *.el files to scan."
@@ -1061,7 +1167,7 @@ searched recursively for *.el files to scan."
                                     (relint--tree-files arg)
                                   (list arg)))
                               command-line-args-left)
-                      default-directory)
+                      nil default-directory)
   (setq command-line-args-left nil))
 
 (provide 'relint)
