@@ -3,8 +3,8 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.7
-;; Package-Requires: ((xr "1.11"))
+;; Version: 1.8
+;; Package-Requires: ((xr "1.12"))
 ;; URL: https://github.com/mattiase/relint
 ;; Keywords: lisp, maint, regexps
 
@@ -54,6 +54,9 @@
 
 ;;; News:
 
+;; Version 1.8:
+;; - Updated diagnostics list
+;; - Requires xr 1.12
 ;; Version 1.7:
 ;; - Expanded regexp-generating heuristics
 ;; - Some `defalias' are now followed
@@ -174,8 +177,8 @@ and PATH (reversed list of list indices to follow to target)."
            (error (list (format "In %s: Error: %s: %s"
                                 name  (cadr err)
                                 (relint--quote-string string)))))))
-    (mapc (lambda (msg) (relint--report file pos path msg))
-          complaints)))
+    (dolist (msg complaints)
+      (relint--report file pos path msg))))
 
 (defun relint--check-skip-set (skip-set-string name file pos path)
   (relint--check-string skip-set-string #'xr-skip-set-lint name file pos path))
@@ -710,7 +713,7 @@ evaluated are nil."
 
 (defun relint--check-list (form name file pos path)
   "Check a list of regexps."
-  ;; Don't use mapc -- mustn't crash on improper lists.
+  ;; Don't use dolist -- mustn't crash on improper lists.
   (let ((l (relint--get-list form file pos path)))
     (while (consp l)
       (when (stringp (car l))
@@ -719,40 +722,38 @@ evaluated are nil."
 
 (defun relint--check-list-any (form name file pos path)
   "Check a list of regexps or conses whose car is a regexp."
-  (mapc (lambda (elem)
-          (cond
-           ((stringp elem)
-            (relint--check-re-string elem name file pos path))
-           ((and (consp elem)
-                 (stringp (car elem)))
-            (relint--check-re-string (car elem) name file pos path))))
-        (relint--get-list form file pos path)))
+  (dolist (elem (relint--get-list form file pos path))
+    (cond
+     ((stringp elem)
+      (relint--check-re-string elem name file pos path))
+     ((and (consp elem)
+           (stringp (car elem)))
+      (relint--check-re-string (car elem) name file pos path)))))
+
 
 (defun relint--check-font-lock-keywords (form name file pos path)
   (relint--check-list-any form name file pos path))
 
 (defun relint--check-compilation-error-regexp-alist-alist (form name
                                                            file pos path)
-  (mapc (lambda (elem)
-          (if (cadr elem)
-              (relint--check-re-string
-               (cadr elem)
-               (format "%s (%s)" name (car elem))
-               file pos path)))
-        (relint--get-list form file pos path)))
+  (dolist (elem (relint--get-list form file pos path))
+    (if (cadr elem)
+        (relint--check-re-string
+         (cadr elem)
+         (format "%s (%s)" name (car elem))
+         file pos path))))
 
 (defun relint--check-rules-list (form name file pos path)
   "Check a variable on `align-mode-rules-list' format"
-  (mapc (lambda (rule)
-          (when (and (consp rule)
-                     (symbolp (car rule)))
-            (let* ((rule-name (car rule))
-                   (re-form (cdr (assq 'regexp (cdr rule))))
-                   (re (relint--get-string re-form file pos path)))
-              (when (stringp re)
-                (relint--check-re-string 
-                 re (format "%s (%s)" name rule-name) file pos path)))))
-        (relint--get-list form file pos path)))
+  (dolist (rule (relint--get-list form file pos path))
+    (when (and (consp rule)
+               (symbolp (car rule)))
+      (let* ((rule-name (car rule))
+             (re-form (cdr (assq 'regexp (cdr rule))))
+             (re (relint--get-string re-form file pos path)))
+        (when (stringp re)
+          (relint--check-re-string 
+           re (format "%s (%s)" name rule-name) file pos path))))))
 
 (defun relint--regexp-generators (expr expanded)
   "List of regexp-generating functions and variables used in EXPR.
