@@ -2,8 +2,8 @@
 
 Relint (regular expression lint) scans elisp files for mistakes in
 regexps, including deprecated syntax and bad practice. It also checks
-the regexp-like arguments to ~skip-chars-forward~ and
-~skip-chars-backward~.
+the regexp-like arguments to ~skip-chars-forward~, ~skip-chars-backward~,
+~skip-syntax-forward~ and ~skip-syntax-backward~.
 
 * Usage
 
@@ -174,6 +174,37 @@ use a different syntax.
 If you are just building a string containing a regexp for display
 purposes, consider using other delimiters than square brackets;
 displaying the regexp ~0-9~ as ~[0-9]~ is very misleading.
+
+- Invalid char 'X' in syntax string ::
+A string argument to ~skip-syntax-forward~ or ~skip-syntax-backward~
+contains a character that doesn't indicate a syntax class. Such a
+string is not a regexp or skip-set, but just a string of syntax codes,
+possibly with a leading ~^~ for negation.
+
+- Duplicated char 'X' in syntax string ::
+A string argument to ~skip-syntax-forward~ or ~skip-syntax-backward~
+contains a duplicated character, which is pointless and may indicate
+a mistake.
+
+- Empty syntax string ::
+A string argument to ~skip-syntax-forward~ or ~skip-syntax-backward~
+is empty, which makes no sense.
+
+* Suppressing diagnostics
+
+While relint has been designed to avoid false positives, there may
+be cases where it emits unfounded complaints. Most of the time, it
+is worth the trouble to change the code to make them go away, but
+sometimes it cannot be done in a reasonable way.
+
+To suppress such diagnostics, add a comment on the form
+
+: ;; relint suppression: MESSAGE
+
+on the line before the code where the error occurred. MESSAGE is a
+substring of the message to be suppressed. Multiple suppression
+comment lines can precede a line of code to eliminate several
+complaints on the same line.
 
 * Bugs
 
