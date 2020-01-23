@@ -3,8 +3,8 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.11
-;; Package-Requires: ((xr "1.13"))
+;; Version: 1.12
+;; Package-Requires: ((xr "1.14"))
 ;; URL: https://github.com/mattiase/relint
 ;; Keywords: lisp, maint, regexps
 
@@ -55,6 +55,10 @@
 
 ;;; News:
 
+;; Version 1.12:
+;; - Improved detection of regexps in defcustom declarations
+;; - Better suppression of false positives
+;; - Nonzero exit status upon error in `relint-batch'
 ;; Version 1.11:
 ;; - Improved evaluator, now handling limited local variable mutation
 ;; - Bug fixes
@@ -1073,11 +1077,14 @@ EXPANDED is a list of expanded functions, to prevent recursion."
     nil)
    ((null (cdr (last expr)))
     (let* ((head (car expr))
+           (args (if (memq head '(if when unless while))
+                     (cddr expr)
+                   (cdr expr)))
            (alias (assq head relint--alias-defs)))
       (if alias
           (relint--regexp-generators (cons (cdr alias) (cdr expr)) expanded)
         (append (mapcan (lambda (x) (relint--regexp-generators x expanded))
-                        (cdr expr))
+                        args)
                 (let ((fun (assq head relint--function-defs)))
                   (and fun (not (memq head expanded))
                        (mapcan (lambda (x)
@@ -1103,6 +1110,7 @@ parameter is regexp-generating."
                 (string-match (rx
                                "%"
                                (opt (1+ digit) "$")
+                               (0+ (any "+ #" ?-))
                                (0+ digit)
                                (opt "." (0+ digit))
                                (group (any "%sdioxXefgcS")))
@@ -1236,10 +1244,19 @@ character alternative: `[' followed by a regexp-generating expression."
       (setq index (+ index 2))
       (setq args (cddr args)))))
 
-(defsubst relint--defcustom-type-regexp-p (type)
-  (or (eq type 'regexp)
-      (and (consp type)
-           (eq (car type) 'regexp))))
+(defun relint--defcustom-type-regexp-p (type)
+  "Whether the defcustom type TYPE indicates a regexp."
+  (pcase type
+    ('regexp t)
+    (`(regexp . ,_) t)
+    (`(string :tag ,tag . ,_)
+     (let ((case-fold-search t))
+       (string-match-p (rx bos
+                           (opt (or "the" "a") " ")
+                           (or "regex" "regular expression"))
+                       tag)))
+    (`(,(or 'choice 'radio) . ,rest)
+     (cl-some #'relint--defcustom-type-regexp-p rest))))
 
 (defun relint--check-and-eval-let-binding (binding mutables file pos path)
   "Check the let-binding BINDING, which is probably (NAME EXPR) or NAME,
@@ -1764,7 +1781,8 @@ searched recursively for *.el files to scan."
                                   (list arg)))
                               command-line-args-left)
                       nil default-directory)
-  (setq command-line-args-left nil))
+  (setq command-line-args-left nil)
+  (kill-emacs (if (> relint--error-count relint--suppression-count) 1 0)))
 
 (provide 'relint)
 
