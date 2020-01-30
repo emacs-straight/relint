@@ -3,10 +3,10 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.12
-;; Package-Requires: ((xr "1.14"))
+;; Version: 1.13
+;; Package-Requires: ((xr "1.15") (emacs "26.1"))
 ;; URL: https://github.com/mattiase/relint
-;; Keywords: lisp, maint, regexps
+;; Keywords: lisp, regexps
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -55,6 +55,13 @@
 
 ;;; News:
 
+;; Version 1.13:
+;; - Look in function/macro doc strings to find regexp arguments and
+;;   return values
+;; - Detect binding and mutation of some known regexp variables
+;; - Detect regexps as arguments to `syntax-propertize-rules'
+;; - More font-lock-keywords variables are scanned for regexps
+;; - `relint-batch' no longer outputs a summary if there were no errors
 ;; Version 1.12:
 ;; - Improved detection of regexps in defcustom declarations
 ;; - Better suppression of false positives
@@ -1044,6 +1051,22 @@ or in the car of an element."
           (relint--check-re-string 
            re (format "%s (%s)" name rule-name) file pos path))))))
 
+(defconst relint--known-regexp-variables
+  '(page-delimiter paragraph-separate paragraph-start
+    sentence-end comment-start-skip comment-end-skip)
+  "List of known (global or buffer-local) regexp variables.")
+
+(defconst relint--known-regexp-returning-functions
+  '(regexp-quote regexp-opt regexp-opt-charset
+    rx rx-to-string wildcard-to-regexp read-regexp
+    char-fold-to-regexp find-tag-default-as-regexp
+    find-tag-default-as-symbol-regexp sentence-end
+    word-search-regexp)
+  "List of functions known to return a regexp.")
+
+;; List of functions believed to return a regexp.
+(defvar relint--regexp-returning-functions)
+
 (defun relint--regexp-generators (expr expanded)
   "List of regexp-generating functions and variables used in EXPR.
 EXPANDED is a list of expanded functions, to prevent recursion."
@@ -1055,9 +1078,7 @@ EXPANDED is a list of expanded functions, to prevent recursion."
                (and def
                     (eq (cadr def) 'expr)
                     (relint--regexp-generators (caddr def) expanded)))
-             (and (or (memq expr '(page-delimiter paragraph-separate
-                                   paragraph-start sentence-end
-                                   comment-start-skip comment-end-skip))
+             (and (or (memq expr relint--known-regexp-variables)
                       ;; This is guesswork, but effective.
                       (string-match-p
                        (rx (or (seq bos (or "regexp" "regex"))
@@ -1066,11 +1087,7 @@ EXPANDED is a list of expanded functions, to prevent recursion."
                        (symbol-name expr)))
                   (list expr)))))
    ((atom expr) nil)
-   ((memq (car expr) '(regexp-quote regexp-opt regexp-opt-charset
-                       rx rx-to-string wildcard-to-regexp read-regexp
-                       char-fold-to-regexp find-tag-default-as-regexp
-                       find-tag-default-as-symbol-regexp sentence-end
-                       word-search-regexp))
+   ((memq (car expr) relint--regexp-returning-functions)
     (list (car expr)))
    ((memq (car expr) '(looking-at re-search-forward re-search-backward
                        string-match string-match-p looking-back looking-at-p))
@@ -1164,47 +1181,83 @@ character alternative: `[' followed by a regexp-generating expression."
       (setq index (1+ index))
       (setq args (cdr args)))))
 
+(defun relint--regexp-args-from-doc (doc-string)
+  "Extract regexp arguments (as a list of symbols) from DOC-STRING."
+  (let ((start 0)
+        (found nil))
+    (while (string-match (rx (any "rR")
+                             (or (seq  "egex" (opt "p"))
+                                 (seq "egular" (+ (any " \n\t")) "expression"))
+                             (+ (any " \n\t"))
+                             (group (+ (any "A-Z" ?-))))
+                         doc-string start)
+      (push (intern (downcase (match-string 1 doc-string))) found)
+      (setq start (match-end 0)))
+    found))
+
 (defun relint--check-form-recursively-1 (form file pos path)
   (pcase form
     (`(,(or 'defun 'defmacro 'defsubst)
        ,name ,args . ,body)
+     (when (symbolp name)
+       (let ((doc-args nil))
+         (when (string-match-p (rx (or  "-regexp" "-regex" "-re") eos)
+                               (symbol-name name))
+           (push name relint--regexp-returning-functions))
+         ;; Examine doc string if any.
+         (when (stringp (car body))
+           (setq doc-args (relint--regexp-args-from-doc (car body)))
+           (when (and (not (memq name relint--regexp-returning-functions))
+                      (let ((case-fold-search t))
+                        (string-match-p
+                         (rx (or bos
+                                 (seq (or "return" "generate" "make")
+                                      (opt "s")
+                                      (+ (any " \n\t"))))
+                             (opt (or "a" "the") (+ (any " \n\t")))
+                             (or "regex"
+                                 (seq "regular"
+                                      (+ (any " \n\t"))
+                                      "expression")))
+                         (car body))))
+             (push name relint--regexp-returning-functions))
+           (setq body (cdr body)))
+         ;; Skip declarations.
+         (while (and (consp (car body))
+                     (memq (caar body) '(interactive declare)))
+           (setq body (cdr body)))
+         ;; Save the function or macro for possible use.
+         (push (list name args body)
+               (if (eq (car form) 'defmacro)
+                   relint--macro-defs
+                 relint--function-defs))
 
-     ;; Skip doc string.
-     (when (stringp (car body))
-       (setq body (cdr body)))
-     ;; Skip declarations.
-     (while (and (consp (car body))
-                 (memq (caar body) '(interactive declare)))
-       (setq body (cdr body)))
-     ;; Save the function or macro for possible use.
-     (push (list name args body)
-           (if (eq (car form) 'defmacro)
-               relint--macro-defs
-             relint--function-defs))
-
-     ;; If any argument looks like a regexp, remember it so that it can be
-     ;; checked in calls.
-     (when (consp args)
-       (let ((indices nil)
-             (index 0))
-         (while args
-           (let ((arg (car args)))
-             (when (symbolp arg)
-               (cond
-                ((eq arg '&optional))   ; Treat optional args as regular.
-                ((eq arg '&rest)
-                 (setq args nil))       ; Ignore &rest args.
-                (t
-                 (when (string-match-p (rx (or (or "regexp" "regex" "-re"
-                                                   "pattern")
-                                               (seq bos "re"))
-                                           eos)
-                                       (symbol-name arg))
-                   (push index indices))
-                 (setq index (1+ index)))))
-             (setq args (cdr args))))
-         (when indices
-           (push (cons name (reverse indices)) relint--regexp-functions)))))
+         ;; If any argument looks like a regexp, remember it so that it can be
+         ;; checked in calls.
+         (when (consp args)
+           (let ((indices nil)
+                 (index 0))
+             (while args
+               (let ((arg (car args)))
+                 (when (symbolp arg)
+                   (cond
+                    ((eq arg '&optional))   ; Treat optional args as regular.
+                    ((eq arg '&rest)
+                     (setq args nil))       ; Ignore &rest args.
+                    (t
+                     (when (or (memq arg doc-args)
+                               (string-match-p
+                                (rx (or (or "regexp" "regex" "-re"
+                                            "pattern")
+                                        (seq bos "re"))
+                                    eos)
+                                (symbol-name arg)))
+                       (push index indices))
+                     (setq index (1+ index)))))
+                 (setq args (cdr args))))
+             (when indices
+               (push (cons name (reverse indices))
+                     relint--regexp-functions)))))))
     (`(defalias ,name-arg ,def-arg . ,_)
      (let ((name (relint--eval-or-nil name-arg))
            (def  (relint--eval-or-nil def-arg)))
@@ -1271,6 +1324,11 @@ return (NAME); on syntax error, return nil."
           (cadr binding) mutables file pos (cons 1 path))
          (let ((val (catch 'relint-eval
                       (list (relint--eval (cadr binding))))))
+           (when (and (consp val)
+                      (stringp (car val))
+                      (memq (car binding) relint--known-regexp-variables))
+             ;; Setting a special buffer-local regexp.
+             (relint--check-re (car val) (car binding) file pos (cons 1 path)))
            (cons (car binding)
                  (if (eq val 'no-value)
                      nil
@@ -1324,7 +1382,7 @@ directly."
            (setq index (1+ index))))))
     (`(let* ,(and (pred listp) bindings) . ,body)
      (relint--check-let* bindings body mutables file pos path 0))
-    (`(setq . ,args)
+    (`(,(or 'setq 'setq-local) . ,args)
      ;; Only mutate lexical variables in the mutation list, which means
      ;; that this form will be executed exactly once during their remaining
      ;; lifetime. Other lexical vars will just be invalidated since we
@@ -1335,15 +1393,19 @@ directly."
                (expr (cadr args)))
            (relint--check-form-recursively-2
             expr mutables file pos (cons i path))
-           ;; Invalidate the variable if it was local; otherwise, ignore.
-           (let ((local (assq name relint--locals)))
-             (when local
-               (setcdr local
-                       (and (memq name mutables)
-                            (let ((val (catch 'relint-eval
-                                         (list (relint--eval expr)))))
-                              (and (not (eq val 'no-value))
-                                   val)))))))
+           (if (memq name relint--known-regexp-variables)
+               ;; Setting a special buffer-local regexp.
+               (relint--check-re expr name file pos (cons i path))
+
+             ;; Invalidate the variable if it was local; otherwise, ignore.
+             (let ((local (assq name relint--locals)))
+               (when local
+                 (setcdr local
+                         (and (memq name mutables)
+                              (let ((val (catch 'relint-eval
+                                           (list (relint--eval expr)))))
+                                (and (not (eq val 'no-value))
+                                     val))))))))
          (setq args (cddr args))
          (setq i (+ i 2)))))
     (`(push ,expr ,(and (pred symbolp) name))
@@ -1508,7 +1570,7 @@ directly."
                                   (symbol-name name)))
               (relint--check-list re-arg name file pos (cons 2 path))
               (push name relint--checked-variables))
-             ((string-match-p (rx "-font-lock-keywords" eos)
+             ((string-match-p (rx "-font-lock-keywords")
                               (symbol-name name))
               (relint--check-font-lock-keywords re-arg name file pos
                                                 (cons 2 path))
@@ -1564,11 +1626,23 @@ directly."
                                     (cons 'val val))))
                         (list 'expr re-arg))))
               (push (cons name new) relint--variables)))))
+       (`(set (make-local-variable ',name) ,expr)
+        (when (memq name relint--known-regexp-variables)
+          (relint--check-re expr name file pos (cons 2 path))))
        (`(define-generic-mode ,name ,_ ,_ ,font-lock-list ,auto-mode-list . ,_)
         (let ((origin (format "define-generic-mode %s" name)))
           (relint--check-font-lock-keywords font-lock-list origin
                                             file pos (cons 4 path))
           (relint--check-list auto-mode-list origin file pos (cons 5 path))))
+       (`(,(or 'syntax-propertize-rules 'syntax-propertize-precompile-rules)
+          . ,rules)
+        (let ((index 1))
+          (dolist (item rules)
+            (when (consp item)
+              (relint--check-re (car item)
+                                (format "call to %s" (car form))
+                                file pos (cons 0 (cons index path))))
+            (setq index (1+ index)))))
        (`(,name . ,args)
         (let ((alias (assq name relint--alias-defs)))
           (when alias
@@ -1648,6 +1722,8 @@ Return a list of (FORM . STARTING-POSITION)."
           (relint--variables nil)
           (relint--checked-variables nil)
           (relint--regexp-functions nil)
+          (relint--regexp-returning-functions
+           relint--known-regexp-returning-functions)
           (relint--function-defs nil)
           (relint--macro-defs nil)
           (relint--alias-defs nil)
@@ -1692,7 +1768,7 @@ Return a list of (FORM . STARTING-POSITION)."
                       (if (zerop supp)
                           ""
                         (format " (%s suppressed)" supp)))))
-    (unless relint--quiet
+    (unless (or relint--quiet (and noninteractive (zerop errors)))
       (unless noninteractive
         (relint--add-to-error-buffer (format "\nFinished -- %s.\n" msg)))
       (message "relint: %s." msg))))
@@ -1772,7 +1848,9 @@ The buffer must be in emacs-lisp-mode."
   "Scan elisp source files for regexp-related errors.
 Call this function in batch mode with files and directories as
 command-line arguments.  Files are scanned; directories are
-searched recursively for *.el files to scan."
+searched recursively for *.el files to scan.
+When done, Emacs terminates with a nonzero status if anything worth
+complaining about was found, zero otherwise."
   (unless noninteractive
     (error "`relint-batch' is only for use with -batch"))
   (relint--scan-files (mapcan (lambda (arg)

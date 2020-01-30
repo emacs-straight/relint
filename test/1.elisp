@@ -29,6 +29,7 @@
                             (regexp . "[a-Z]"))))
 
 (defconst bad-font-lock-keywords '(("[xx]" . tag) "[yy]"))
+(defconst more-font-lock-keywords-bad '(("[uu]" . tag) "[vv]"))
 
 ;; Test variable doc string heuristics.
 (defconst bad-var-1 "a^"
@@ -85,3 +86,15 @@
     ("2^" argl))
   '("a" "b++" "c")
   nil)
+
+(defun my-syn-1 ()
+  (syntax-propertize-rules
+   ("thing" stuff)
+   ("$1$" bad)
+   ("^2^" alsobad)))
+
+(defun my-syn-2 ()
+  (syntax-propertize-precompile-rules
+   ("thing" stuff)
+   ("$3$" bad)
+   ("^4^" alsobad)))
