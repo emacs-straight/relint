@@ -1,6 +1,6 @@
 ;;; relint-test.el --- Tests for relint.el        -*- lexical-binding: t -*-
 
-;; Copyright (C) 2019 Free Software Foundation, Inc.
+;; Copyright (C) 2019-2020 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
 
@@ -79,9 +79,7 @@ and a path."
       (dolist (item (relint-test--enumerate-nodes toplevel-form nil))
         (let* ((node (car item))
                (path (cdr item))
-               (pos-line-col (relint--pos-line-col-from-toplevel-pos-path
-                              toplevel-pos path))
-               (pos (nth 0 pos-line-col)))
+               (pos (relint--pos-from-start-pos-path toplevel-pos path)))
           ;; Skip sugared items; they cannot be read in isolation.
           (unless (memq node '(quote function \` \, \,@))
             (goto-char pos)
@@ -98,7 +96,10 @@ and a path."
 (defun relint-test--scan-file (file)
   "Scan FILE and return the results as a string."
   (with-temp-buffer
-    (relint--scan-buffer (find-file-noselect file t) (current-buffer) t)
+    ;; The reference files (*.expected) are kept in the `grave' style,
+    ;; to make the test independent of `text-quoting-style'.
+    (let ((text-quoting-style 'grave))
+      (relint--scan-buffer (find-file-noselect file t) (current-buffer) t))
     (buffer-string)))
 
 (defun relint-test--read-file (file)
@@ -122,3 +123,23 @@ and a path."
             nil (rx ".elisp" eos)))
   (let ((base (string-remove-suffix ".elisp" f)))
     (eval `(relint-test--deftest ,base))))
+
+(ert-deftest relint-buffer ()
+  (let ((buf (get-buffer-create " *relint-test*"))
+        (text-quoting-style 'grave))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (emacs-lisp-mode)
+            (insert ";hello\n(looking-at \"broken**regexp\")\n")
+            (insert "(looking-at (make-string 2 ?^))\n")
+            (insert "(looking-at (concat \"ab\" \"cdef\" \"[gg]\"))\n"))
+          (should (equal
+                   (relint-buffer buf)
+                   '(("In call to looking-at: Repetition of repetition" 20 28
+                      "broken**regexp" 7)
+                     ("In call to looking-at: Unescaped literal `^'" 50 nil
+                      "^^" 1)
+                     ("In call to looking-at: Duplicated `g' inside character alternative"
+                      82 105 "abcdef[gg]" 8)))))
+      (kill-buffer buf))))
