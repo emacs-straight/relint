@@ -12,4 +12,18 @@
           (any "0-9+-.")
           (any "-a-e")
           (any "k-m-")
-          (any "A-F-K-T")))))
+          (any "A-F-K-T")))
+   (rx (regexp "[11]")
+       (regex "[22]")
+       (eval (list 'any "33")))
+   (rx-to-string '(: bol
+                     (any "AA")))
+   (rx-to-string `(: bol
+                     ,(list 'in "BB")))
+   `(rx ,(list 'char "CC"))
+   `(rx ,@(list nonl (list 'any "DD"))))
+
+  ;; No error here.
+  (rx (any "\000-\377" ?å) (any "\377" 255))
+  ;; But here.
+  (rx (any "\000-\377" "\177" "\240")))
