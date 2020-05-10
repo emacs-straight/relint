@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019-2020 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.16
+;; Version: 1.17
 ;; Package-Requires: ((xr "1.19") (emacs "26.1"))
 ;; URL: https://github.com/mattiase/relint
 ;; Keywords: lisp, regexps
@@ -29,6 +29,8 @@
 
 ;;; News:
 
+;; Version 1.17:
+;; - Fixed message display on Emacs 26
 ;; Version 1.16:
 ;; - Suppression comments now use regexp matching of messages
 ;; - New filename-specific checks in calls to `directory-files' etc
@@ -283,7 +285,8 @@ or nil if no position could be determined."
 
 (defun relint--escape-string (str escape-printable)
   (replace-regexp-in-string
-   (rx (any cntrl "\177-\377" ?\\ ?\"))
+   ;; Use pair notation for raw chars; "\200-\377" is buggy in Emacs 26.
+   (rx (any cntrl ?\177 (#x3fff80 . #x3fffff) ?\\ ?\"))
    (lambda (s)
      (let ((c (logand (string-to-char s) #xff)))
        (or (cdr (assq c '((?\b . "\\b")
@@ -1420,7 +1423,9 @@ than just to a surrounding or producing expression."
            (push (cons arg arg) ranges))
 
           ((stringp arg)
-           (let* ((s (string-to-multibyte arg))
+           ;; `string-to-multibyte' was marked obsolete in Emacs 26,
+           ;; but no longer is.
+           (let* ((s (with-no-warnings (string-to-multibyte arg)))
                   (j 0)
                   (len (length s)))
              (while (< j len)
