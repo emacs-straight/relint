@@ -26,3 +26,5 @@
    ....^
 13.elisp:18:30: Ineffective string escape `\+'
 13.elisp:19:16: Ineffective string escape `\q'
+13.elisp:22:16: Ineffective string escape `\8'
+13.elisp:22:19: Ineffective string escape `\9'
