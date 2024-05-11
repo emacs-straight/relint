@@ -1,2 +1,2 @@
 ;; Generated package description from relint.el  -*- no-byte-compile: t -*-
-(define-package "relint" "1.24.0.20240401.74454" "Elisp regexp mistake finder" '((xr "1.25") (emacs "26.1")) :commit "09524811318482946c382b94793f7e38e0e39e64" :authors '(("Mattias Engdegård" . "mattiase@acm.org")) :maintainer '("Mattias Engdegård" . "mattiase@acm.org") :keywords '("lisp" "regexps") :url "https://github.com/mattiase/relint")
+(define-package "relint" "1.24.0.20240510.91500" "Elisp regexp mistake finder" '((xr "1.25") (emacs "26.1")) :commit "086b0123cf27a75f394b4c717233e9fc8e0adaf8" :authors '(("Mattias Engdegård" . "mattiase@acm.org")) :maintainer '("Mattias Engdegård" . "mattiase@acm.org") :keywords '("lisp" "regexps") :url "https://github.com/mattiase/relint")
