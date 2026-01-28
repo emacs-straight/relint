@@ -123,23 +123,5 @@ Version 1.8
 Version 1.7
 - Expanded regexp-generating heuristics
 - Some `defalias' are now followed
-- All diagnostics are now documented (see README.org)
-
-Version 1.6
-- Add `relint-current-buffer'
-- Show relative file names in *relint*
-- Extended regexp-generating heuristics, warning about suspiciously-named
-  variables used as skip-sets
-- "-patterns" and "-pattern-list" are no longer interesting variable
-  suffixes
-
-Version 1.5
-- Substantially improved evaluator, able to evaluate some functions and
-  macros defined in the same file, even when passed as parameters
-- Detect regexps spliced into [...]
-- Check bad skip-set provenance
-- The *relint* buffer now uses a new relint-mode for better usability,
-  with "g" bound to `relint-again'
-
-Version 1.4
-- First version after name change to `relint'
+...
+...
